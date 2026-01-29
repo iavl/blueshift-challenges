@@ -1,0 +1,27 @@
+[package]
+name = "blueshift_secp256r1_vault"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pinocchio = { version = "0.10.1", features = ["cpi"] }
+pinocchio-secp256r1-instruction = "0.1.2"
+pinocchio-system = "0.5.0"
+
+solana-address = { version = "2.0.0", features = ["curve25519"] }
+solana-program-log = "1.1.0"
+
+borsh = { version = "1.6.0", default-features = false, features = [
+  "derive",
+], optional = true }
+shank = { version = "0.4.6", optional = true }
+
+
+[lib]
+crate-type = ["lib", "cdylib"]
+name = "blueshift_secp256r1_vault"
+
+
+[features]
+# 定义一个名为 idl-build 的功能开关
+idl-build = ["shank", "borsh"]
