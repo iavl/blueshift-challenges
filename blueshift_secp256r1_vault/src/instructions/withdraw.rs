@@ -1,29 +1,39 @@
+use core::convert::TryFrom;
 use pinocchio::{
-    cpi::{Seed, Signer},
-    error::ProgramError,
-    AccountView, Address, ProgramResult,
+    account_info::Ref,
+    instruction::{Seed, Signer},
+    program_error::ProgramError,
+    sysvars::{
+        clock::Clock,
+        instructions::{Instructions, IntrospectedInstruction},
+        Sysvar,
+    },
+    ProgramResult,
 };
+use pinocchio_secp256r1_instruction::{Secp256r1Instruction, Secp256r1Pubkey};
 use pinocchio_system::instructions::Transfer;
 
+use pinocchio::account_info::AccountInfo;
+
 pub struct WithdrawAccounts<'a> {
-    pub owner: &'a AccountView,
-    pub vault: &'a AccountView,
-    pub bumps: [u8; 1],
+    pub payer: &'a AccountInfo,
+    pub vault: &'a AccountInfo,
+    pub instructions: &'a AccountInfo,
 }
 
-impl<'a> TryFrom<&'a [AccountView]> for WithdrawAccounts<'a> {
+impl<'a> TryFrom<&'a [AccountInfo]> for WithdrawAccounts<'a> {
     type Error = ProgramError;
-    fn try_from(accounts: &'a [AccountView]) -> Result<Self, Self::Error> {
-        let [owner, vault, _] = accounts else {
+
+    fn try_from(accounts: &'a [AccountInfo]) -> Result<Self, Self::Error> {
+        let [payer, vault, instructions, _system_program] = accounts else {
             return Err(ProgramError::NotEnoughAccountKeys);
         };
 
-        // Basic Accounts Checks
-        if !owner.is_signer() {
+        if !payer.is_signer() {
             return Err(ProgramError::InvalidAccountOwner);
         }
 
-        if !vault.owned_by(&pinocchio_system::ID) {
+        if !vault.is_owned_by(&pinocchio_system::ID) {
             return Err(ProgramError::InvalidAccountOwner);
         }
 
@@ -31,52 +41,90 @@ impl<'a> TryFrom<&'a [AccountView]> for WithdrawAccounts<'a> {
             return Err(ProgramError::InvalidAccountData);
         }
 
-        let (vault_key, bump) =
-            Address::find_program_address(&[b"vault", owner.address().as_ref()], &crate::ID);
-        if vault.address() != &vault_key {
-            return Err(ProgramError::InvalidAccountOwner);
-        }
-
         Ok(Self {
-            owner,
+            payer,
             vault,
-            bumps: [bump],
+            instructions,
+        })
+    }
+}
+
+pub struct WithdrawInstructionData {
+    pub bump: [u8; 1],
+}
+
+impl<'a> TryFrom<&'a [u8]> for WithdrawInstructionData {
+    type Error = ProgramError;
+
+    fn try_from(data: &'a [u8]) -> Result<Self, Self::Error> {
+        Ok(Self {
+            bump: [*data.first().ok_or(ProgramError::InvalidInstructionData)?],
         })
     }
 }
 
 pub struct Withdraw<'a> {
     pub accounts: WithdrawAccounts<'a>,
+    pub instruction_data: WithdrawInstructionData,
 }
 
-impl<'a> TryFrom<&'a [AccountView]> for Withdraw<'a> {
+impl<'a> TryFrom<(&'a [u8], &'a [AccountInfo])> for Withdraw<'a> {
     type Error = ProgramError;
-    fn try_from(accounts: &'a [AccountView]) -> Result<Self, Self::Error> {
+
+    fn try_from((data, accounts): (&'a [u8], &'a [AccountInfo])) -> Result<Self, Self::Error> {
         let accounts = WithdrawAccounts::try_from(accounts)?;
-        Ok(Self { accounts })
+        let instruction_data = WithdrawInstructionData::try_from(data)?;
+
+        Ok(Self {
+            accounts,
+            instruction_data,
+        })
     }
 }
 
 impl<'a> Withdraw<'a> {
-    pub const DISCRIMINATOR: &'a u8 = &1;
     pub fn process(&mut self) -> ProgramResult {
-        // Create PDA signer seeds
+        let instructions: Instructions<Ref<[u8]>> =
+            Instructions::try_from(self.accounts.instructions)?;
+        let ix: IntrospectedInstruction = instructions.get_instruction_relative(1)?;
+        let secp256r1_ix = Secp256r1Instruction::try_from(&ix)?;
+        if secp256r1_ix.num_signatures() != 1 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let signer: Secp256r1Pubkey = *secp256r1_ix.get_signer(0)?;
+
+        let message_data = secp256r1_ix.get_message_data(0)?;
+        if message_data.len() < 32 + 8 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let (payer, expiry) = message_data.split_at(32);
+        if self.accounts.payer.key().as_ref().ne(payer) {
+            return Err(ProgramError::InvalidAccountOwner);
+        }
+
+        let now = Clock::get()?.unix_timestamp;
+        let expiry = i64::from_le_bytes(
+            expiry[..8]
+                .try_into()
+                .map_err(|_| ProgramError::InvalidInstructionData)?,
+        );
+        if now > expiry {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
         let seeds = [
             Seed::from(b"vault"),
-            Seed::from(self.accounts.owner.address().as_ref()),
-            Seed::from(&self.accounts.bumps),
+            Seed::from(signer[..1].as_ref()),
+            Seed::from(signer[1..].as_ref()),
+            Seed::from(&self.instruction_data.bump),
         ];
-
         let signers = [Signer::from(&seeds)];
 
-        // Transfer all lamports from vault to owner
         Transfer {
             from: self.accounts.vault,
-            to: self.accounts.owner,
+            to: self.accounts.payer,
             lamports: self.accounts.vault.lamports(),
         }
-        .invoke_signed(&signers)?;
-
-        Ok(())
+        .invoke_signed(&signers)
     }
 }

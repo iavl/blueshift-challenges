@@ -1,25 +1,32 @@
-use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
+use core::convert::TryFrom;
+use pinocchio::{
+    program_error::ProgramError,
+    pubkey::{find_program_address, Pubkey},
+    ProgramResult,
+};
+use pinocchio_secp256r1_instruction::Secp256r1Pubkey;
 use pinocchio_system::instructions::Transfer;
 
-// 账户验证 -> 指令数据解析 -> 业务逻辑执行。
+use pinocchio::account_info::AccountInfo;
+
 pub struct DepositAccounts<'a> {
-    pub owner: &'a AccountView,
-    pub vault: &'a AccountView,
+    pub payer: &'a AccountInfo,
+    pub vault: &'a AccountInfo,
 }
 
-impl<'a> TryFrom<&'a [AccountView]> for DepositAccounts<'a> {
+impl<'a> TryFrom<&'a [AccountInfo]> for DepositAccounts<'a> {
     type Error = ProgramError;
-    fn try_from(accounts: &'a [AccountView]) -> Result<Self, Self::Error> {
-        let [owner, vault, _] = accounts else {
+
+    fn try_from(accounts: &'a [AccountInfo]) -> Result<Self, Self::Error> {
+        let [payer, vault, _] = accounts else {
             return Err(ProgramError::NotEnoughAccountKeys);
         };
 
-        // Accounts CHecks
-        if !owner.is_signer() {
+        if !payer.is_signer() {
             return Err(ProgramError::InvalidAccountOwner);
         }
 
-        if !vault.owned_by(&pinocchio_system::ID) {
+        if !vault.is_owned_by(&pinocchio_system::ID) {
             return Err(ProgramError::InvalidAccountOwner);
         }
 
@@ -27,36 +34,34 @@ impl<'a> TryFrom<&'a [AccountView]> for DepositAccounts<'a> {
             return Err(ProgramError::InvalidAccountData);
         }
 
-        let (vault_key, _) =
-            Address::find_program_address(&[b"vault", owner.address().as_ref()], &crate::ID);
-        if vault.address().ne(&vault_key) {
-            return Err(ProgramError::InvalidAccountOwner);
-        }
-
-        // Return the accounts
-        Ok(Self { owner, vault })
+        Ok(Self { payer, vault })
     }
 }
 
 pub struct DepositInstructionData {
+    pub pubkey: Secp256r1Pubkey,
     pub amount: u64,
 }
 
 impl<'a> TryFrom<&'a [u8]> for DepositInstructionData {
     type Error = ProgramError;
+
     fn try_from(data: &'a [u8]) -> Result<Self, Self::Error> {
-        if data.len() != size_of::<u64>() {
+        if data.len() < 33 + 8 {
             return Err(ProgramError::InvalidInstructionData);
         }
 
-        let amount = u64::from_le_bytes(data.try_into().unwrap());
+        let (pubkey_bytes, amount_bytes) = data.split_at(33);
 
-        // Instruction CHecks
-        if amount.eq(&0) {
-            return Err(ProgramError::InvalidInstructionData);
-        }
+        let pubkey = Secp256r1Pubkey::try_from(pubkey_bytes)
+            .map_err(|_| ProgramError::InvalidInstructionData)?;
+        let amount = u64::from_le_bytes(
+            amount_bytes
+                .try_into()
+                .map_err(|_| ProgramError::InvalidInstructionData)?,
+        );
 
-        Ok(Self { amount })
+        Ok(Self { pubkey, amount })
     }
 }
 
@@ -65,11 +70,13 @@ pub struct Deposit<'a> {
     pub instruction_data: DepositInstructionData,
 }
 
-impl<'a> TryFrom<(&'a [u8], &'a [AccountView])> for Deposit<'a> {
+impl<'a> TryFrom<(&'a [u8], &'a [AccountInfo])> for Deposit<'a> {
     type Error = ProgramError;
-    fn try_from((data, accounts): (&'a [u8], &'a [AccountView])) -> Result<Self, Self::Error> {
+
+    fn try_from((data, accounts): (&'a [u8], &'a [AccountInfo])) -> Result<Self, Self::Error> {
         let accounts = DepositAccounts::try_from(accounts)?;
         let instruction_data = DepositInstructionData::try_from(data)?;
+
         Ok(Self {
             accounts,
             instruction_data,
@@ -78,11 +85,21 @@ impl<'a> TryFrom<(&'a [u8], &'a [AccountView])> for Deposit<'a> {
 }
 
 impl<'a> Deposit<'a> {
-    pub const DISCRIMINATOR: &'a u8 = &0;
-    pub fn process(&self) -> ProgramResult {
-        
+    pub fn process(&mut self) -> ProgramResult {
+        let (vault_key, _) = find_program_address(
+            &[
+                b"vault",
+                &self.instruction_data.pubkey[..1],
+                &self.instruction_data.pubkey[1..33],
+            ],
+            &crate::ID,
+        );
+        if vault_key.ne(self.accounts.vault.key()) {
+            return Err(ProgramError::InvalidAccountOwner);
+        }
+
         Transfer {
-            from: self.accounts.owner,
+            from: self.accounts.payer,
             to: self.accounts.vault,
             lamports: self.instruction_data.amount,
         }
