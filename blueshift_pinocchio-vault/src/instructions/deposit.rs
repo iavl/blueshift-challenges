@@ -8,6 +8,7 @@ use pinocchio_system::instructions::Transfer;
 
 use pinocchio::account_info::AccountInfo;
 
+/// Deposit accounts: [owner (signer), vault PDA, system_program].
 pub struct DepositAccounts<'a> {
     pub owner: &'a AccountInfo,
     pub vault: &'a AccountInfo,
@@ -21,18 +22,22 @@ impl<'a> core::convert::TryFrom<&'a [AccountInfo]> for DepositAccounts<'a> {
             return Err(ProgramError::NotEnoughAccountKeys);
         };
 
+        // Owner must sign to authorize the transfer.
         if !owner.is_signer() {
             return Err(ProgramError::InvalidAccountOwner);
         }
 
+        // Vault must be a system-owned account (uninitialized PDA).
         if !vault.is_owned_by(&pinocchio_system::ID) {
             return Err(ProgramError::InvalidAccountOwner);
         }
 
+        // Vault must be empty to prevent double deposit.
         if vault.lamports().ne(&0) {
             return Err(ProgramError::InvalidAccountData);
         }
 
+        // Verify vault is the PDA derived from [b"vault", owner].
         let (vault_key, _) =
             find_program_address(&[b"vault", owner.key().as_ref()], &crate::ID);
         if vault.key().ne(&vault_key) {
@@ -43,6 +48,7 @@ impl<'a> core::convert::TryFrom<&'a [AccountInfo]> for DepositAccounts<'a> {
     }
 }
 
+/// Deposit instruction data: lamport amount (u64, little-endian).
 pub struct DepositInstructionData {
     pub amount: u64,
 }
@@ -57,6 +63,7 @@ impl<'a> core::convert::TryFrom<&'a [u8]> for DepositInstructionData {
 
         let amount = u64::from_le_bytes(data.try_into().unwrap());
 
+        // Reject zero amount.
         if amount == 0 {
             return Err(ProgramError::InvalidInstructionData);
         }
@@ -65,6 +72,7 @@ impl<'a> core::convert::TryFrom<&'a [u8]> for DepositInstructionData {
     }
 }
 
+/// Deposit instruction: owner sends lamports to their vault PDA.
 pub struct Deposit<'a> {
     pub accounts: DepositAccounts<'a>,
     pub instruction_data: DepositInstructionData,
@@ -85,6 +93,7 @@ impl<'a> core::convert::TryFrom<(&'a [u8], &'a [AccountInfo])> for Deposit<'a> {
 }
 
 impl<'a> Deposit<'a> {
+    /// CPI: transfer lamports from owner to vault PDA.
     pub fn process(&mut self) -> ProgramResult {
         Transfer {
             from: self.accounts.owner,

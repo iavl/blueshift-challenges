@@ -3,14 +3,16 @@
 use pinocchio::{
     account_info::AccountInfo,
     entrypoint,
-    nostd_panic_handler,
     program_error::ProgramError,
     pubkey::Pubkey,
     ProgramResult,
 };
 
 entrypoint!(process_instruction);
-nostd_panic_handler!();
+
+// Omit in SBF build to avoid duplicate lang item (entrypoint provides panic handling)
+#[cfg(not(target_arch = "bpfel"))]
+pinocchio::nostd_panic_handler!();
 
 pub mod instructions;
 pub use instructions::*;

@@ -7,6 +7,7 @@ use pinocchio_system::instructions::Transfer;
 
 use pinocchio::account_info::AccountInfo;
 
+/// Withdraw accounts: [owner (signer), vault PDA, system_program]. Bump stored for PDA signing.
 pub struct WithdrawAccounts<'a> {
     pub owner: &'a AccountInfo,
     pub vault: &'a AccountInfo,
@@ -21,6 +22,7 @@ impl<'a> core::convert::TryFrom<&'a [AccountInfo]> for WithdrawAccounts<'a> {
             return Err(ProgramError::NotEnoughAccountKeys);
         };
 
+        // Only the vault owner may withdraw.
         if !owner.is_signer() {
             return Err(ProgramError::InvalidAccountOwner);
         }
@@ -29,10 +31,12 @@ impl<'a> core::convert::TryFrom<&'a [AccountInfo]> for WithdrawAccounts<'a> {
             return Err(ProgramError::InvalidAccountOwner);
         }
 
+        // Vault must have lamports to withdraw.
         if vault.lamports().eq(&0) {
             return Err(ProgramError::InvalidAccountData);
         }
 
+        // Verify vault PDA and get bump for invoke_signed.
         let (vault_key, bump) =
             pinocchio::pubkey::find_program_address(&[b"vault", owner.key().as_ref()], &crate::ID);
         if vault.key() != &vault_key {
@@ -47,6 +51,7 @@ impl<'a> core::convert::TryFrom<&'a [AccountInfo]> for WithdrawAccounts<'a> {
     }
 }
 
+/// Withdraw instruction: owner drains vault PDA back to themselves (PDA signs).
 pub struct Withdraw<'a> {
     pub accounts: WithdrawAccounts<'a>,
 }
@@ -62,6 +67,7 @@ impl<'a> core::convert::TryFrom<&'a [AccountInfo]> for Withdraw<'a> {
 }
 
 impl<'a> Withdraw<'a> {
+    /// PDA signs: transfer all lamports from vault back to owner via invoke_signed.
     pub fn process(&mut self) -> ProgramResult {
         let seeds = [
             Seed::from(b"vault"),
